@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Speech Pronunciation Helper</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <h1 class="app-title">Text Input</h1>
+      <label class="input-label" for="textInput">Paste text here</label>
+      <textarea id="textInput" class="text-input" rows="8" placeholder="Paste or type text..."></textarea>
+      <div class="button-row">
+        <button id="enterButton" class="button button-primary" type="button">Enter</button>
+        <button id="clearButton" class="button" type="button">Clear</button>
+      </div>
+    </aside>
+    <main class="text-view" aria-live="polite">
+      <h2 class="section-title">Text View</h2>
+      <div id="wordsContainer" class="words-container" role="list"></div>
+      <footer class="text-view-footer">
+        <button id="clearViewButton" class="button button-danger" type="button">Clear Text View</button>
+      </footer>
+    </main>
+  </div>
+  <script src="script.js"></script>
+</body>
+</html>
