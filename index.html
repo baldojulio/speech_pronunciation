@@ -19,6 +19,20 @@
     </aside>
     <main class="text-view" aria-live="polite">
       <h2 class="section-title">Text View</h2>
+      <section class="session-controls">
+        <div class="session-buttons">
+          <button id="startSessionButton" class="button button-primary" type="button">Start Listening</button>
+          <button id="stopSessionButton" class="button button-danger" type="button" disabled>Stop</button>
+        </div>
+        <div class="session-status">
+          <span id="sessionStatus" class="status-indicator" aria-live="polite">Status: Idle</span>
+        </div>
+        <p id="supportMessage" class="support-message" hidden>Speech recognition is not available in this browser.</p>
+        <div class="recognized-container">
+          <h3 class="recognized-title">Latest Recognition</h3>
+          <p id="recognizedOutput" class="recognized-output" aria-live="polite">Say the sentence once listening starts.</p>
+        </div>
+      </section>
       <div id="wordsContainer" class="words-container" role="list"></div>
       <footer class="text-view-footer">
         <button id="clearViewButton" class="button button-danger" type="button">Clear Text View</button>
