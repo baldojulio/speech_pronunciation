@@ -1,18 +1,18 @@
 // Lightweight tests for normalizeWord, parseText, and matchWords
 
-function normalizeWord(word) {
+const normalizeWord = word => {
   return word.replace(/[^\p{L}\p{N}]/gu, '').toLocaleLowerCase();
-}
+};
 
-function parseText(rawText) {
+const parseText = rawText => {
   const words = rawText.trim().split(/\s+/).filter(Boolean);
   return words.map(word => ({
     original: word,
     normalized: normalizeWord(word)
   }));
-}
+};
 
-function matchWords(targetWords, recognizedWords) {
+const matchWords = (targetWords, recognizedWords) => {
   const n = targetWords.length;
   const m = recognizedWords.length;
 
@@ -69,9 +69,9 @@ function matchWords(targetWords, recognizedWords) {
   }
 
   return { targetMatched, recognizedMatched, furthestMatch };
-}
+};
 
-function assertEqual(name, actual, expected) {
+const assertEqual = (name, actual, expected) => {
   const pass = JSON.stringify(actual) === JSON.stringify(expected);
   console.log(`${pass ? '✅' : '❌'} ${name}`);
   if (!pass) {
@@ -79,25 +79,25 @@ function assertEqual(name, actual, expected) {
     console.log('   received:', actual);
   }
   return pass;
-}
+};
 
-function testNormalizeWord() {
+const testNormalizeWord = () => {
   return [
     assertEqual('normalize basic', normalizeWord('Hello!'), 'hello'),
     assertEqual('normalize accents', normalizeWord('café'), 'café'),
     assertEqual('normalize numbers', normalizeWord('Room-101'), 'room101')
   ];
-}
+};
 
-function testParseText() {
+const testParseText = () => {
   const parsed = parseText('Hello, world!');
   return [
     assertEqual('parse length', parsed.length, 2),
     assertEqual('parse normalized', parsed.map(w => w.normalized), ['hello', 'world'])
   ];
-}
+};
 
-function testMatchWords() {
+const testMatchWords = () => {
   const target = ['hello', 'world', 'world'];
   const recognized = ['hello', 'brave', 'world'];
   const { targetMatched, recognizedMatched, furthestMatch } = matchWords(target, recognized);
@@ -107,9 +107,9 @@ function testMatchWords() {
     assertEqual('match mapping', recognizedMatched.map(m => m.targetIndex), [0, null, 1]),
     assertEqual('furthest match', furthestMatch, 1)
   ];
-}
+};
 
-function runTests() {
+const runTests = () => {
   const results = [
     ...testNormalizeWord(),
     ...testParseText(),
@@ -118,6 +118,6 @@ function runTests() {
 
   const passed = results.filter(Boolean).length;
   console.log(`\n${passed}/${results.length} assertions passed`);
-}
+};
 
 runTests();
