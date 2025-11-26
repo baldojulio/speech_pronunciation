@@ -1,11 +1,13 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Speech Pronunciation Helper</title>
   <link rel="stylesheet" href="styles.css">
 </head>
+
 <body>
   <div class="app-shell">
     <aside class="sidebar">
@@ -17,21 +19,52 @@
         <button id="clearButton" class="button" type="button">Clear</button>
       </div>
     </aside>
-    <main class="text-view" aria-live="polite">
+    <main class="text-view">
       <h2 class="section-title">Text View</h2>
       <section class="session-controls">
         <div class="session-buttons">
-          <button id="startSessionButton" class="button button-primary" type="button">Start Listening</button>
-          <button id="stopSessionButton" class="button button-danger" type="button" disabled>Stop</button>
+          <button id="startSessionButton" class="button button-primary" type="button"
+            title="Start Listening (Alt+S)">Start Listening</button>
+          <button id="stopSessionButton" class="button button-danger" type="button" disabled
+            title="Stop (Alt+X or Escape)">Stop</button>
+        </div>
+        <div class="locale-selector">
+          <label for="localeSelect" class="locale-label">Language:</label>
+          <select id="localeSelect" class="locale-select">
+            <option value="en-US">English (US)</option>
+            <option value="en-GB">English (UK)</option>
+            <option value="en-AU">English (Australia)</option>
+            <option value="es-ES">Spanish (Spain)</option>
+            <option value="es-MX">Spanish (Mexico)</option>
+            <option value="fr-FR">French</option>
+            <option value="de-DE">German</option>
+            <option value="it-IT">Italian</option>
+            <option value="pt-BR">Portuguese (Brazil)</option>
+            <option value="pt-PT">Portuguese (Portugal)</option>
+            <option value="zh-CN">Chinese (Simplified)</option>
+            <option value="zh-TW">Chinese (Traditional)</option>
+            <option value="ja-JP">Japanese</option>
+            <option value="ko-KR">Korean</option>
+            <option value="ru-RU">Russian</option>
+            <option value="ar-SA">Arabic</option>
+            <option value="hi-IN">Hindi</option>
+            <option value="nl-NL">Dutch</option>
+            <option value="pl-PL">Polish</option>
+            <option value="tr-TR">Turkish</option>
+          </select>
         </div>
         <div class="session-status">
           <span id="sessionStatus" class="status-indicator" aria-live="polite">Status: Idle</span>
+          <div id="sessionSummary" class="session-summary" hidden></div>
         </div>
         <p id="supportMessage" class="support-message" hidden>Speech recognition is not available in this browser.</p>
         <div class="recognized-container">
           <h3 class="recognized-title">Latest Recognition</h3>
-          <p id="recognizedOutput" class="recognized-output" aria-live="polite">Say the sentence once listening starts.</p>
+          <p id="recognizedOutput" class="recognized-output" aria-live="polite">Say the sentence once listening starts.
+          </p>
         </div>
+        <p class="keyboard-hint">Keyboard: <kbd>Alt+S</kbd> Start · <kbd>Alt+X</kbd> or <kbd>Esc</kbd> Stop ·
+          <kbd>Cmd/Ctrl+Enter</kbd> Enter text</p>
       </section>
       <div id="wordsContainer" class="words-container" role="list"></div>
       <footer class="text-view-footer">
@@ -41,4 +74,5 @@
   </div>
   <script src="script.js"></script>
 </body>
+
 </html>

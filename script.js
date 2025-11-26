@@ -8,213 +8,368 @@ const stopSessionButton = document.querySelector('#stopSessionButton');
 const sessionStatus = document.querySelector('#sessionStatus');
 const supportMessage = document.querySelector('#supportMessage');
 const recognizedOutput = document.querySelector('#recognizedOutput');
+const localeSelect = document.querySelector('#localeSelect');
+const sessionSummary = document.querySelector('#sessionSummary');
 
 const idleRecognizedMessage = 'Say the sentence once listening starts.';
-const readyRecognizedMessage = 'Press “Start Listening” and repeat the sentence.';
+const readyRecognizedMessage = 'Press "Start Listening" and repeat the sentence.';
+
+// Debug flag - set to true to enable console logging
+const DEBUG = false;
 
 const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
 
-let recognition = null;
-let targetWords = [];
-let shouldResetOnNextResult = false;
-let isListening = false;
+// localStorage keys
+const STORAGE_KEY_TEXT = 'speechPronunciation_text';
+const STORAGE_KEY_LOCALE = 'speechPronunciation_locale';
 
+let recognition = null;
+let targetWords = [];        // Normalized target words for comparison
+let displayWords = [];       // Original words for display
+let isListening = false;
+let currentMatchIndex = 0;   // Track the furthest matched position
+let rawTranscript = '';      // Store raw transcript for display
+let silenceTimer = null;     // Timer for detecting long silences
+const SILENCE_TIMEOUT = 10000; // 10 seconds of silence before prompting
+
+/**
+ * Debug logging helper
+ */
+function debugLog(...args) {
+  if (DEBUG) {
+    console.log(...args);
+  }
+}
+
+/**
+ * Simple debounce helper to limit high-frequency DOM updates
+ */
+function debounce(fn, delay = 100) {
+  let timeout;
+  return (...args) => {
+    clearTimeout(timeout);
+    timeout = setTimeout(() => fn(...args), delay);
+  };
+}
+
+// Queue for recognition rendering to avoid excessive DOM churn
+let pendingRecognition = null;
+const renderRecognition = debounce(() => {
+  if (!pendingRecognition) return;
+
+  const { recognizedWords } = pendingRecognition;
+  pendingRecognition = null;
+
+  updateSessionStatus('Listening…', 'status-listening');
+
+  if (!recognizedWords.length) {
+    setRecognizedMessage('Listening…');
+    return;
+  }
+
+  if (recognizedWords.length && targetWords.length) {
+    applyWordHighlights(recognizedWords);
+  } else {
+    // Fall back to raw transcript for readability when no targets
+    setRecognizedMessage(rawTranscript || recognizedWords.join(' '));
+  }
+}, 100);
+
+/**
+ * Normalize a single word for comparison (lowercase, remove punctuation)
+ * Uses Unicode-aware regex to support international characters
+ */
+function normalizeWord(word) {
+  // Remove non-letter/non-number characters, keeping Unicode letters
+  return word.replace(/[^\p{L}\p{N}]/gu, '').toLocaleLowerCase();
+}
+
+/**
+ * Split text into words, preserving original form and creating normalized version
+ */
+function parseText(rawText) {
+  const words = rawText.trim().split(/\s+/).filter(Boolean);
+  return words.map(word => ({
+    original: word,
+    normalized: normalizeWord(word)
+  }));
+}
+
+/**
+ * Normalize raw text into array of lowercase words for comparison
+ */
 function normalizeWords(rawText) {
   return rawText
+    .trim()
     .split(/\s+/)
-    .map(word => word.replace(/[^a-zA-Z0-9]+/g, '').toLowerCase())
+    .map(word => normalizeWord(word))
     .filter(Boolean);
 }
 
-function createWordChip(word, index) {
+/**
+ * Create a word chip element for display
+ */
+function createWordChip(wordData, index) {
   const chip = document.createElement('span');
   chip.className = 'word-chip';
-  const wordId = index + 1;
-  chip.id = `word-${wordId}`;
+  chip.id = `word-${index}`;
   chip.dataset.index = String(index);
-  chip.dataset.wordId = String(wordId);
-  chip.textContent = word;
+  chip.dataset.normalized = wordData.normalized;
+  chip.textContent = wordData.original;
   chip.setAttribute('role', 'listitem');
   return chip;
 }
 
+/**
+ * Render word chips in the container
+ */
 function renderWordCards(words) {
   wordsContainer.innerHTML = '';
-  words.forEach((word, index) => {
-    wordsContainer.appendChild(createWordChip(word, index));
+  words.forEach((wordData, index) => {
+    wordsContainer.appendChild(createWordChip(wordData, index));
   });
 }
 
+/**
+ * Reset all word highlights to default state
+ */
 function resetWordHighlights() {
   wordsContainer.querySelectorAll('.word-chip').forEach(chip => {
     chip.classList.remove('word-match', 'word-mismatch');
   });
 }
 
-function applyWordHighlights(recognizedWords) {
-  const chips = wordsContainer.querySelectorAll('.word-chip');
-  const {
-    expectedStatuses,
-    recognizedMatches
-  } = computeWordStatuses(targetWords, recognizedWords);
+/**
+ * Word matching algorithm using dynamic programming (LCS-based alignment)
+ * This properly handles repeated words by finding the optimal alignment
+ * between recognized and target sequences
+ */
+function matchWords(targetWords, recognizedWords) {
+  const n = targetWords.length;
+  const m = recognizedWords.length;
 
-  chips.forEach((chip, index) => {
-    chip.classList.remove('word-match', 'word-mismatch');
-    const status = expectedStatuses[index];
-    if (status === 'match') {
-      chip.classList.add('word-match');
-    } else if (status === 'mismatch') {
-      chip.classList.add('word-mismatch');
+  const targetMatched = new Array(n).fill(false);
+  const recognizedMatched = new Array(m).fill(null);
+
+  if (n === 0 || m === 0) {
+    // Mark all recognized as extra if no targets
+    for (let i = 0; i < m; i++) {
+      recognizedMatched[i] = { targetIndex: null, status: 'extra' };
     }
-  });
+    return { targetMatched, recognizedMatched, furthestMatch: -1 };
+  }
 
-  updateRecognizedWordTokens(recognizedWords, recognizedMatches);
+  // Build LCS table
+  const dp = Array(n + 1).fill(null).map(() => Array(m + 1).fill(0));
+
+  for (let i = 1; i <= n; i++) {
+    for (let j = 1; j <= m; j++) {
+      if (targetWords[i - 1] === recognizedWords[j - 1]) {
+        dp[i][j] = dp[i - 1][j - 1] + 1;
+      } else {
+        dp[i][j] = Math.max(dp[i - 1][j], dp[i][j - 1]);
+      }
+    }
+  }
+
+  // Backtrack to find the actual matches
+  let i = n, j = m;
+  const matches = [];
+
+  while (i > 0 && j > 0) {
+    if (targetWords[i - 1] === recognizedWords[j - 1]) {
+      matches.push({ targetIdx: i - 1, recIdx: j - 1 });
+      i--;
+      j--;
+    } else if (dp[i - 1][j] > dp[i][j - 1]) {
+      i--;
+    } else {
+      j--;
+    }
+  }
+
+  // Apply matches (they're in reverse order)
+  matches.reverse();
+  let furthestMatch = -1;
+
+  for (const match of matches) {
+    targetMatched[match.targetIdx] = true;
+    recognizedMatched[match.recIdx] = { targetIndex: match.targetIdx, status: 'match' };
+    furthestMatch = Math.max(furthestMatch, match.targetIdx);
+  }
+
+  // Mark unmatched recognized words as extra
+  for (let k = 0; k < m; k++) {
+    if (!recognizedMatched[k]) {
+      recognizedMatched[k] = { targetIndex: null, status: 'extra' };
+    }
+  }
+
+  return { targetMatched, recognizedMatched, furthestMatch };
 }
 
-function updateRecognizedWordTokens(recognizedWords, recognizedMatches) {
-  const tokens = recognizedOutput.querySelectorAll('.recognized-word');
-  if (!tokens.length) {
+/**
+ * Apply highlights to word chips based on recognition results
+ */
+function applyWordHighlights(recognizedWords) {
+  if (!targetWords.length) return;
+
+  debugLog('--- Recognition Update ---');
+  debugLog('Target words:', targetWords);
+  debugLog('Recognized words:', recognizedWords);
+
+  const { targetMatched, recognizedMatched, furthestMatch } = matchWords(targetWords, recognizedWords);
+
+  // Update the current match index for progress tracking
+  currentMatchIndex = furthestMatch;
+
+  debugLog('Target matched:', targetMatched);
+  debugLog('Recognized matched:', recognizedMatched);
+  debugLog('Furthest match:', furthestMatch);
+
+  // Highlight target words
+  const chips = wordsContainer.querySelectorAll('.word-chip');
+  chips.forEach((chip, index) => {
+    chip.classList.remove('word-match', 'word-mismatch', 'word-current');
+
+    if (targetMatched[index]) {
+      chip.classList.add('word-match');
+    } else if (index <= furthestMatch && recognizedWords.length > 0) {
+      // Only mark as mismatch if we've passed this word (it was skipped)
+      chip.classList.add('word-mismatch');
+    } else if (index === furthestMatch + 1) {
+      // Highlight the next expected word
+      chip.classList.add('word-current');
+    }
+    // Words beyond furthestMatch+1 remain neutral (not yet evaluated)
+  });
+
+  // Update recognized output with highlighting
+  updateRecognizedDisplay(recognizedWords, recognizedMatched);
+
+  // Update session summary
+  updateSessionSummary(targetMatched, recognizedWords.length);
+}
+
+/**
+ * Update the recognized output display with word tokens
+ * Shows the raw transcript for readability
+ */
+function updateRecognizedDisplay(recognizedWords, recognizedMatched) {
+  recognizedOutput.innerHTML = '';
+
+  if (!recognizedWords.length) {
+    recognizedOutput.textContent = 'Listening…';
     return;
   }
 
-  tokens.forEach((token, index) => {
-    const match = recognizedMatches[index] || { expectedIndex: null, status: 'unmatched' };
-    const baseWordId = index + 1;
-    token.classList.remove('recognized-word-match', 'recognized-word-mismatch', 'recognized-word-extra');
+  // Show raw transcript if available, otherwise show normalized words
+  if (rawTranscript) {
+    const rawWords = rawTranscript.trim().split(/\s+/);
+    rawWords.forEach((word, index) => {
+      const token = document.createElement('span');
+      token.className = 'recognized-word';
+      token.textContent = word;
 
-    if (match.expectedIndex !== null && typeof match.expectedIndex === 'number') {
-      const targetWordId = match.expectedIndex + 1;
-      token.dataset.wordId = String(targetWordId);
-      token.dataset.targetWordId = `word-${targetWordId}`;
-
-      if (match.status === 'match') {
-        token.classList.add('recognized-word-match');
-        token.id = `word-${targetWordId}`;
-      } else {
-        token.classList.add('recognized-word-mismatch');
-        token.id = `recognized-word-${targetWordId}`;
-      }
-      return;
-    }
-
-    token.dataset.wordId = String(baseWordId);
-    token.dataset.targetWordId = '';
-    token.classList.add('recognized-word-extra');
-    token.id = `recognized-extra-${baseWordId}`;
-  });
-}
-
-function computeWordStatuses(expectedWords, recognizedWords) {
-  const expectedLength = expectedWords.length;
-  const recognizedLength = recognizedWords.length;
-  if (!expectedLength) {
-    return {
-      expectedStatuses: [],
-      recognizedMatches: recognizedWords.map(() => ({
-        expectedIndex: null,
-        status: 'unmatched'
-      }))
-    };
-  }
-
-  const dp = Array.from({ length: expectedLength + 1 }, () =>
-    Array(recognizedLength + 1).fill(null)
-  );
-
-  dp[0][0] = { cost: 0, prev: null, op: null };
-  for (let i = 1; i <= expectedLength; i += 1) {
-    dp[i][0] = { cost: i, prev: [i - 1, 0], op: 'delete' };
-  }
-  for (let j = 1; j <= recognizedLength; j += 1) {
-    dp[0][j] = { cost: j, prev: [0, j - 1], op: 'insert' };
-  }
-
-  const operationPriority = {
-    match: 3,
-    substitute: 2,
-    delete: 1,
-    insert: 0
-  };
-
-  for (let i = 1; i <= expectedLength; i += 1) {
-    for (let j = 1; j <= recognizedLength; j += 1) {
-      const expectedWord = expectedWords[i - 1];
-      const recognizedWord = recognizedWords[j - 1];
-
-      const diagonalCost =
-        dp[i - 1][j - 1].cost + (expectedWord === recognizedWord ? 0 : 1);
-      const deleteCost = dp[i - 1][j].cost + 1;
-      const insertCost = dp[i][j - 1].cost + 1;
-
-      const options = [
-        {
-          cost: diagonalCost,
-          op: expectedWord === recognizedWord ? 'match' : 'substitute',
-          prev: [i - 1, j - 1]
-        },
-        { cost: deleteCost, op: 'delete', prev: [i - 1, j] },
-        { cost: insertCost, op: 'insert', prev: [i, j - 1] }
-      ];
-
-      options.sort((a, b) => {
-        if (a.cost !== b.cost) {
-          return a.cost - b.cost;
+      // Map to the corresponding normalized word match status
+      if (index < recognizedMatched.length) {
+        const match = recognizedMatched[index];
+        if (match) {
+          if (match.status === 'match') {
+            token.classList.add('recognized-word-match');
+            if (match.targetIndex !== null && match.targetIndex !== undefined) {
+              token.dataset.targetIndex = String(match.targetIndex);
+            }
+          } else if (match.status === 'mismatch') {
+            token.classList.add('recognized-word-mismatch');
+          } else {
+            token.classList.add('recognized-word-extra');
+          }
         }
-        return operationPriority[b.op] - operationPriority[a.op];
-      });
-
-      dp[i][j] = options[0];
-    }
-  }
-
-  const statuses = new Array(expectedLength).fill('mismatch');
-  const recognizedMatches = new Array(recognizedLength).fill(null);
-  let i = expectedLength;
-  let j = recognizedLength;
-
-  while (i > 0 || j > 0) {
-    const cell = dp[i][j];
-    if (!cell) {
-      break;
-    }
-
-    const { op, prev } = cell;
-    if (op === 'match') {
-      statuses[i - 1] = 'match';
-      recognizedMatches[j - 1] = { expectedIndex: i - 1, status: 'match' };
-      i -= 1;
-      j -= 1;
-    } else if (op === 'substitute') {
-      statuses[i - 1] = 'mismatch';
-      recognizedMatches[j - 1] = { expectedIndex: i - 1, status: 'mismatch' };
-      i -= 1;
-      j -= 1;
-    } else if (op === 'delete') {
-      statuses[i - 1] = 'mismatch';
-      i -= 1;
-    } else if (op === 'insert') {
-      recognizedMatches[j - 1] = { expectedIndex: null, status: 'insert' };
-      j -= 1;
-    } else {
-      break;
-    }
-
-    if (!prev) {
-      break;
-    }
-  }
-
-  return {
-    expectedStatuses: statuses,
-    recognizedMatches: recognizedMatches.map(match => {
-      if (match) {
-        return match;
       }
-      return { expectedIndex: null, status: 'unmatched' };
-    })
-  };
+
+      recognizedOutput.appendChild(token);
+
+      if (index < rawWords.length - 1) {
+        recognizedOutput.appendChild(document.createTextNode(' '));
+      }
+    });
+  } else {
+    recognizedWords.forEach((word, index) => {
+      const token = document.createElement('span');
+      token.className = 'recognized-word';
+      token.textContent = word;
+
+      const match = recognizedMatched[index];
+      if (match) {
+        if (match.status === 'match') {
+          token.classList.add('recognized-word-match');
+          if (match.targetIndex !== null && match.targetIndex !== undefined) {
+            token.dataset.targetIndex = String(match.targetIndex);
+          }
+        } else if (match.status === 'mismatch') {
+          token.classList.add('recognized-word-mismatch');
+        } else {
+          token.classList.add('recognized-word-extra');
+        }
+      }
+
+      recognizedOutput.appendChild(token);
+
+      if (index < recognizedWords.length - 1) {
+        recognizedOutput.appendChild(document.createTextNode(' '));
+      }
+    });
+  }
 }
 
+/**
+ * Update session summary with match statistics
+ */
+function updateSessionSummary(targetMatched, recognizedCount) {
+  if (!sessionSummary) return;
+
+  const totalTarget = targetMatched.length;
+  const matchedCount = targetMatched.filter(Boolean).length;
+  const percent = totalTarget > 0 ? Math.round((matchedCount / totalTarget) * 100) : 0;
+
+  sessionSummary.innerHTML = `
+    <span class="summary-stat">Progress: <strong>${matchedCount}/${totalTarget}</strong> words (${percent}%)</span>
+  `;
+  sessionSummary.hidden = false;
+
+  // Check if session is complete
+  if (matchedCount === totalTarget && totalTarget > 0) {
+    showSessionComplete(matchedCount, totalTarget);
+  }
+}
+
+/**
+ * Show session complete state
+ */
+function showSessionComplete(matched, total) {
+  updateSessionStatus('Complete! 🎉', 'status-complete');
+
+  if (sessionSummary) {
+    sessionSummary.innerHTML = `
+      <span class="summary-stat summary-complete">✓ All ${total} words matched!</span>
+    `;
+  }
+}
+
+/**
+ * Reset session summary
+ */
+function resetSessionSummary() {
+  if (sessionSummary) {
+    sessionSummary.innerHTML = '';
+    sessionSummary.hidden = true;
+  }
+}
+
+/**
+ * Update session status display
+ */
 function updateSessionStatus(label, variant = 'status-idle') {
   const allowedVariants = new Set([
     'status-idle',
@@ -229,182 +384,227 @@ function updateSessionStatus(label, variant = 'status-idle') {
   sessionStatus.className = `status-indicator ${appliedVariant}`;
 }
 
+/**
+ * Update button states based on listening state
+ */
 function setListeningState(listening) {
   isListening = listening;
   startSessionButton.disabled = listening;
   stopSessionButton.disabled = !listening;
 }
 
-function setRecognizedMessage(message, withWordIds = false) {
-  if (!withWordIds) {
-    recognizedOutput.textContent = message;
-    return;
-  }
-
-  const words = normalizeWords(message);
-  recognizedOutput.innerHTML = '';
-
-  if (!words.length) {
-    recognizedOutput.textContent = message;
-    return;
-  }
-
-  words.forEach((word, index) => {
-    const wordId = index + 1;
-    const token = document.createElement('span');
-    token.className = 'recognized-word';
-    token.id = `recognized-word-${wordId}`;
-    token.dataset.wordId = String(wordId);
-    token.dataset.index = String(index);
-    token.textContent = word;
-    recognizedOutput.appendChild(token);
-    if (index < words.length - 1) {
-      recognizedOutput.appendChild(document.createTextNode(' '));
-    }
-  });
+/**
+ * Set a simple text message in recognized output
+ */
+function setRecognizedMessage(message) {
+  recognizedOutput.textContent = message;
 }
 
+/**
+ * Add text from input to the view
+ */
 function addTextToView() {
   stopListening();
 
   const rawText = textInput.value.trim();
   if (!rawText) {
+    updateSessionStatus('Enter some text first', 'status-error');
     return;
   }
 
-  const words = normalizeWords(rawText);
-  if (!words.length) {
-    updateSessionStatus('Add text to practice first.', 'status-error');
+  const parsedWords = parseText(rawText);
+  if (!parsedWords.length) {
+    updateSessionStatus('No valid words found', 'status-error');
     setRecognizedMessage(idleRecognizedMessage);
     return;
   }
 
-  targetWords = words;
-  shouldResetOnNextResult = false;
-  renderWordCards(targetWords);
+  // Filter out empty normalized words
+  const validWords = parsedWords.filter(w => w.normalized.length > 0);
+  if (!validWords.length) {
+    updateSessionStatus('No valid words found', 'status-error');
+    return;
+  }
+
+  displayWords = validWords;
+  targetWords = validWords.map(w => w.normalized);
+
+  renderWordCards(displayWords);
   resetWordHighlights();
   setRecognizedMessage(readyRecognizedMessage);
   updateSessionStatus('Ready', 'status-ready');
+  resetSessionSummary();
+  currentMatchIndex = -1;
+  rawTranscript = '';
+
+  // Save to localStorage
+  saveToStorage();
 }
 
+/**
+ * Clear the sidebar input
+ */
 function clearSidebarInput() {
   textInput.value = '';
   textInput.focus();
 }
 
+/**
+ * Stop speech recognition
+ */
 function stopListening() {
-  if (!recognition || !isListening) {
-    return;
+  if (!recognition) return;
+
+  isListening = false; // Set this first to prevent restart in handleRecognitionEnd
+  clearSilenceTimer();
+
+  try {
+    recognition.stop();
+  } catch (e) {
+    // Ignore errors when stopping
   }
 
-  recognition.stop();
   setListeningState(false);
-  shouldResetOnNextResult = false;
-  updateSessionStatus('Ready', 'status-ready');
+
+  // Show final summary if we have results
+  if (targetWords.length > 0 && currentMatchIndex >= 0) {
+    const matchedCount = wordsContainer.querySelectorAll('.word-match').length;
+    const total = targetWords.length;
+    if (matchedCount === total) {
+      updateSessionStatus('Complete! 🎉', 'status-complete');
+    } else {
+      updateSessionStatus(`Stopped - ${matchedCount}/${total} matched`, 'status-ready');
+    }
+  } else if (targetWords.length) {
+    updateSessionStatus('Ready', 'status-ready');
+  } else {
+    updateSessionStatus('Idle', 'status-idle');
+  }
 }
 
+/**
+ * Clear the text view
+ */
 function clearTextView() {
   stopListening();
   targetWords = [];
-  shouldResetOnNextResult = false;
+  displayWords = [];
+  currentMatchIndex = -1;
+  rawTranscript = '';
   wordsContainer.innerHTML = '';
-  resetWordHighlights();
   setRecognizedMessage(idleRecognizedMessage);
   updateSessionStatus('Idle', 'status-idle');
+  resetSessionSummary();
 }
 
+/**
+ * Handle speech recognition results
+ * Processes results efficiently using event.resultIndex
+ */
 function handleRecognitionResult(event) {
-  const results = Array.from(event.results);
-  const resultIndex = event.resultIndex ?? results.length - 1;
-  const result = results[resultIndex];
+  if (!isListening) return;
 
-  if (!result) {
-    return;
-  }
+  // Reset silence timer on any speech
+  resetSilenceTimer();
 
-  const currentTranscript = (result[0] && result[0].transcript ? result[0].transcript : '').trim();
-  const aggregateTranscript = results
-    .map(res => (res[0] && res[0].transcript ? res[0].transcript : ''))
-    .join(' ')
-    .trim();
+  // Build transcript from all results
+  let fullTranscript = '';
+  let hasFinalResult = false;
 
-  if (result.isFinal === false) {
-    const interimTranscript = aggregateTranscript || currentTranscript;
-    if (interimTranscript) {
-      const interimMessage = interimTranscript.toLowerCase();
-      setRecognizedMessage(interimMessage, true);
-      const interimWords = normalizeWords(interimMessage);
-      if (interimWords.length && targetWords.length) {
-        const { recognizedMatches } = computeWordStatuses(targetWords, interimWords);
-        updateRecognizedWordTokens(interimWords, recognizedMatches);
-      }
-    } else {
-      setRecognizedMessage('Listening…');
+  for (let i = 0; i < event.results.length; i++) {
+    const result = event.results[i];
+    const transcript = result[0]?.transcript || '';
+    fullTranscript += transcript + ' ';
+
+    if (result.isFinal) {
+      hasFinalResult = true;
     }
-    updateSessionStatus('Listening…', 'status-listening');
+  }
+
+  fullTranscript = fullTranscript.trim();
+  rawTranscript = fullTranscript; // Store raw for display
+
+  if (!fullTranscript) {
+    setRecognizedMessage('Listening…');
     return;
   }
 
-  if (shouldResetOnNextResult) {
-    resetWordHighlights();
-    shouldResetOnNextResult = false;
-  }
+  // Normalize and match words
+  const recognizedWords = normalizeWords(fullTranscript);
 
-  const finalTranscript = results
-    .filter(res => res.isFinal)
-    .map(res => (res[0] && res[0].transcript ? res[0].transcript : ''))
-    .join(' ')
-    .trim();
-
-  if (!finalTranscript) {
-    setRecognizedMessage('No speech detected. Try again.');
-    updateSessionStatus(isListening ? 'Listening…' : 'Ready', isListening ? 'status-listening' : 'status-ready');
-    return;
-  }
-
-  setRecognizedMessage(finalTranscript.toLowerCase(), true);
-  const recognizedWords = normalizeWords(finalTranscript);
-  if (!recognizedWords.length || !targetWords.length) {
-    updateSessionStatus(isListening ? 'Listening…' : 'Ready', isListening ? 'status-listening' : 'status-ready');
-    return;
-  }
-
-  applyWordHighlights(recognizedWords);
-  updateSessionStatus(isListening ? 'Listening…' : 'Ready', isListening ? 'status-listening' : 'status-ready');
+  pendingRecognition = { recognizedWords: [...recognizedWords] };
+  renderRecognition();
 }
 
+/**
+ * Reset the silence detection timer
+ */
+function resetSilenceTimer() {
+  if (silenceTimer) {
+    clearTimeout(silenceTimer);
+  }
+
+  silenceTimer = setTimeout(() => {
+    if (isListening) {
+      updateSessionStatus('Listening… (continue speaking)', 'status-listening');
+    }
+  }, SILENCE_TIMEOUT);
+}
+
+/**
+ * Clear the silence timer
+ */
+function clearSilenceTimer() {
+  if (silenceTimer) {
+    clearTimeout(silenceTimer);
+    silenceTimer = null;
+  }
+}
+
+/**
+ * Handle recognition end event
+ */
 function handleRecognitionEnd() {
-  if (isListening) {
-    updateSessionStatus('Listening…', 'status-listening');
-    shouldResetOnNextResult = true;
-    if (!recognition) {
-      return;
+  if (!isListening) {
+    setListeningState(false);
+    if (targetWords.length) {
+      updateSessionStatus('Ready', 'status-ready');
+    } else {
+      updateSessionStatus('Idle', 'status-idle');
     }
-    setTimeout(() => {
-      try {
-        recognition.start();
-      } catch (error) {
-        if (error.name !== 'InvalidStateError') {
-          handleRecognitionError({ error: error.name || error.message });
-        }
-      }
-    }, 250);
     return;
   }
 
-  setListeningState(false);
-  updateSessionStatus('Ready', 'status-ready');
+  // Auto-restart if still supposed to be listening
+  setTimeout(() => {
+    if (!isListening || !recognition) return;
+
+    try {
+      recognition.start();
+    } catch (error) {
+      if (error.name !== 'InvalidStateError') {
+        console.error('Failed to restart recognition:', error);
+        handleRecognitionError({ error: error.name || 'unknown' });
+      }
+    }
+  }, 100);
 }
 
+/**
+ * Handle recognition errors
+ */
 function handleRecognitionError(event) {
   const errorKey = String(event.error || 'unknown').toLowerCase();
 
+  // Ignore no-speech errors - just keep listening
   if (errorKey === 'no-speech') {
-    setRecognizedMessage('No speech detected. Still listening…');
-    updateSessionStatus('Listening…', 'status-listening');
+    if (isListening) {
+      updateSessionStatus('Listening… (no speech detected)', 'status-listening');
+    }
     return;
   }
 
+  // Ignore aborted errors (happens when we stop manually)
   if (errorKey === 'aborted') {
     return;
   }
@@ -412,23 +612,31 @@ function handleRecognitionError(event) {
   let message = 'Speech recognition error. Please try again.';
 
   if (errorKey === 'not-allowed' || errorKey === 'notallowederror') {
-    message = 'Microphone access was denied.';
+    message = 'Microphone access was denied. Please allow microphone access and try again.';
   } else if (errorKey === 'audio-capture' || errorKey === 'notfounderror') {
-    message = 'No microphone was found.';
+    message = 'No microphone was found. Please connect a microphone.';
+  } else if (errorKey === 'network') {
+    message = 'Network error. Please check your internet connection.';
   }
 
+  console.error('Speech recognition error:', errorKey);
   setRecognizedMessage(message);
   updateSessionStatus('Error', 'status-error');
   setListeningState(false);
+  isListening = false;
 }
 
-function startListening() {
+/**
+ * Start speech recognition
+ */
+async function startListening() {
   if (!recognition) {
+    updateSessionStatus('Speech recognition not supported', 'status-error');
     return;
   }
 
   if (!targetWords.length) {
-    updateSessionStatus('Add text to practice first.', 'status-error');
+    updateSessionStatus('Add text to practice first', 'status-error');
     textInput.focus();
     return;
   }
@@ -437,34 +645,74 @@ function startListening() {
     return;
   }
 
-  shouldResetOnNextResult = false;
+  // Preflight microphone permission check
+  const micStatus = await checkMicrophonePermission();
+  if (micStatus === 'denied') {
+    updateSessionStatus('Microphone access denied', 'status-error');
+    setRecognizedMessage('Please allow microphone access in your browser settings and reload the page.');
+    return;
+  }
+
+  // Reset state for new session
+  currentMatchIndex = -1;
+  rawTranscript = '';
   resetWordHighlights();
+  resetSessionSummary();
   setRecognizedMessage('Listening…');
   updateSessionStatus('Listening…', 'status-listening');
   setListeningState(true);
+  resetSilenceTimer();
+
+  // Update recognition language from selector
+  if (localeSelect && recognition) {
+    recognition.lang = localeSelect.value;
+  }
 
   try {
     recognition.start();
   } catch (error) {
     if (error.name === 'InvalidStateError') {
-      // Ignore invalid state errors when recognition is already running.
+      // Already running, that's fine
       return;
     }
+    console.error('Failed to start recognition:', error);
     handleRecognitionError({ error: error.name || error.message });
   }
 }
 
+/**
+ * Check microphone permission status
+ */
+async function checkMicrophonePermission() {
+  try {
+    if (navigator.permissions && navigator.permissions.query) {
+      const result = await navigator.permissions.query({ name: 'microphone' });
+      return result.state; // 'granted', 'denied', or 'prompt'
+    }
+    // Fallback: try to get user media
+    return 'prompt';
+  } catch (e) {
+    // Permission API not supported, assume prompt
+    return 'prompt';
+  }
+}
+
+/**
+ * Initialize speech recognition
+ */
 function initializeSpeechRecognition() {
   if (!SpeechRecognition) {
     supportMessage.hidden = false;
     startSessionButton.disabled = true;
     stopSessionButton.disabled = true;
-    updateSessionStatus('Unsupported in this browser', 'status-error');
+    updateSessionStatus('Not supported in this browser', 'status-error');
     return;
   }
 
+  const defaultLocale = localStorage.getItem(STORAGE_KEY_LOCALE) || navigator.language || 'en-US';
+
   recognition = new SpeechRecognition();
-  recognition.lang = navigator.language || 'en-US';
+  recognition.lang = defaultLocale;
   recognition.interimResults = true;
   recognition.maxAlternatives = 1;
   recognition.continuous = true;
@@ -472,8 +720,53 @@ function initializeSpeechRecognition() {
   recognition.addEventListener('result', handleRecognitionResult);
   recognition.addEventListener('end', handleRecognitionEnd);
   recognition.addEventListener('error', handleRecognitionError);
+
+  // Also handle audiostart/audioend for better status feedback
+  recognition.addEventListener('audiostart', () => {
+    if (isListening) {
+      updateSessionStatus('Listening…', 'status-listening');
+    }
+  });
+
+  // Initialize locale selector if present
+  if (localeSelect) {
+    localeSelect.value = defaultLocale;
+    localeSelect.addEventListener('change', () => {
+      if (recognition) {
+        recognition.lang = localeSelect.value;
+        localStorage.setItem(STORAGE_KEY_LOCALE, localeSelect.value);
+      }
+    });
+  }
 }
 
+/**
+ * Save current state to localStorage
+ */
+function saveToStorage() {
+  try {
+    localStorage.setItem(STORAGE_KEY_TEXT, textInput.value);
+  } catch (e) {
+    // localStorage might be unavailable
+    debugLog('Failed to save to localStorage:', e);
+  }
+}
+
+/**
+ * Load state from localStorage
+ */
+function loadFromStorage() {
+  try {
+    const savedText = localStorage.getItem(STORAGE_KEY_TEXT);
+    if (savedText && textInput) {
+      textInput.value = savedText;
+    }
+  } catch (e) {
+    debugLog('Failed to load from localStorage:', e);
+  }
+}
+
+// Event listeners
 enterButton.addEventListener('click', addTextToView);
 clearButton.addEventListener('click', clearSidebarInput);
 clearViewButton.addEventListener('click', clearTextView);
@@ -487,6 +780,31 @@ textInput.addEventListener('keydown', event => {
   }
 });
 
+// Save text on input change (debounced)
+let saveTimeout = null;
+textInput.addEventListener('input', () => {
+  if (saveTimeout) clearTimeout(saveTimeout);
+  saveTimeout = setTimeout(saveToStorage, 500);
+});
+
+// Keyboard shortcuts for accessibility
+document.addEventListener('keydown', event => {
+  // Alt+S to start listening
+  if (event.altKey && event.key === 's') {
+    event.preventDefault();
+    if (!isListening && targetWords.length) {
+      startListening();
+    }
+  }
+  // Alt+X or Escape to stop listening
+  if ((event.altKey && event.key === 'x') || (event.key === 'Escape' && isListening)) {
+    event.preventDefault();
+    stopListening();
+  }
+});
+
+// Initialize
 initializeSpeechRecognition();
+loadFromStorage();
 setRecognizedMessage(idleRecognizedMessage);
 updateSessionStatus('Idle', 'status-idle');
