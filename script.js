@@ -13,6 +13,9 @@ const recognizedOutput = document.querySelector('#recognizedOutput');
 const localeSelect = document.querySelector('#localeSelect');
 const sessionSummary = document.querySelector('#sessionSummary');
 
+// Optional "skip word" control (may or may not exist in the DOM)
+const skipWordButton = document.querySelector('#skipWordButton');
+
 const idleRecognizedMessage = 'Say the sentence once listening starts.';
 const readyRecognizedMessage = 'Press "Start Listening" and repeat the sentence.';
 
@@ -33,6 +36,8 @@ let currentMatchIndex = 0;   // Track the furthest matched position
 let rawTranscript = '';      // Store raw transcript for display
 let silenceTimer = null;     // Timer for detecting long silences
 const SILENCE_TIMEOUT = 10000; // 10 seconds of silence before prompting
+const skippedIndices = new Set(); // Track target word indices explicitly skipped by the user
+let lastRecognizedWords = []; // Cache last normalized recognition result for re-rendering (e.g., after skip)
 
 /**
  * Debug logging helper
@@ -137,14 +142,16 @@ const renderWordCards = words => {
  */
 const resetWordHighlights = () => {
   wordsContainer.querySelectorAll('.word-chip').forEach(chip => {
-    chip.classList.remove('word-match', 'word-mismatch');
+    chip.classList.remove('word-match', 'word-mismatch', 'word-current');
   });
 };
 
 /**
- * Word matching algorithm using dynamic programming (LCS-based alignment)
- * This properly handles repeated words by finding the optimal alignment
- * between recognized and target sequences
+ * Word matching algorithm with strict sequential alignment.
+ * - You can only advance to the next target word if the
+ *   current word was pronounced correctly OR explicitly skipped.
+ * - Any spoken word while the current word is incorrect is
+ *   treated as another attempt for that same position.
  */
 const matchWords = (targetWords, recognizedWords) => {
   const n = targetWords.length;
@@ -153,59 +160,65 @@ const matchWords = (targetWords, recognizedWords) => {
   const targetMatched = new Array(n).fill(false);
   const recognizedMatched = new Array(m).fill(null);
 
-  if (n === 0 || m === 0) {
-    // Mark all recognized as extra if no targets
+  // No target text: treat all recognized words as extra
+  if (n === 0) {
     for (let i = 0; i < m; i++) {
       recognizedMatched[i] = { targetIndex: null, status: 'extra' };
     }
     return { targetMatched, recognizedMatched, furthestMatch: -1 };
   }
 
-  // Build LCS table
-  const dp = Array(n + 1).fill(null).map(() => Array(m + 1).fill(0));
-
-  for (let i = 1; i <= n; i++) {
-    for (let j = 1; j <= m; j++) {
-      if (targetWords[i - 1] === recognizedWords[j - 1]) {
-        dp[i][j] = dp[i - 1][j - 1] + 1;
-      } else {
-        dp[i][j] = Math.max(dp[i - 1][j], dp[i][j - 1]);
-      }
-    }
+  // Target exists but nothing recognized yet: nothing attempted
+  if (m === 0) {
+    return { targetMatched, recognizedMatched, furthestMatch: -1 };
   }
 
-  // Backtrack to find the actual matches
-  let i = n, j = m;
-  const matches = [];
-
-  while (i > 0 && j > 0) {
-    if (targetWords[i - 1] === recognizedWords[j - 1]) {
-      matches.push({ targetIdx: i - 1, recIdx: j - 1 });
-      i--;
-      j--;
-    } else if (dp[i - 1][j] > dp[i][j - 1]) {
-      i--;
-    } else {
-      j--;
-    }
-  }
-
-  // Apply matches (they're in reverse order)
-  matches.reverse();
   let furthestMatch = -1;
 
-  for (const match of matches) {
-    targetMatched[match.targetIdx] = true;
-    recognizedMatched[match.recIdx] = { targetIndex: match.targetIdx, status: 'match' };
-    furthestMatch = Math.max(furthestMatch, match.targetIdx);
-  }
+  // Helper: has this target index been "completed" already?
+  // A word is completed if it was matched in this pass, or
+  // the user explicitly skipped it.
+  const isCompleted = index => skippedIndices.has(index) || targetMatched[index];
 
-  // Mark unmatched recognized words as extra
-  for (let k = 0; k < m; k++) {
-    if (!recognizedMatched[k]) {
-      recognizedMatched[k] = { targetIndex: null, status: 'extra' };
+  let currentTargetIndex = 0;
+
+  for (let i = 0; i < m; i++) {
+    // Move to the next unfinished target index
+    while (currentTargetIndex < n && isCompleted(currentTargetIndex)) {
+      furthestMatch = Math.max(furthestMatch, currentTargetIndex);
+      currentTargetIndex++;
+    }
+
+    // All target words completed – remaining recognitions are extras
+    if (currentTargetIndex >= n) {
+      recognizedMatched[i] = { targetIndex: null, status: 'extra' };
+      continue;
+    }
+
+    const spoken = recognizedWords[i];
+    const expected = targetWords[currentTargetIndex];
+
+    if (spoken === expected) {
+      // Correct pronunciation for the current target word
+      targetMatched[currentTargetIndex] = true;
+      recognizedMatched[i] = { targetIndex: currentTargetIndex, status: 'match' };
+      furthestMatch = Math.max(furthestMatch, currentTargetIndex);
+      currentTargetIndex++;
+    } else {
+      // Mismatch – stay on the same target index.
+      // Further words will continue to be attempts for this same word
+      // until it is either pronounced correctly or skipped.
+      recognizedMatched[i] = { targetIndex: currentTargetIndex, status: 'mismatch' };
     }
   }
+
+  // Ensure furthestMatch also includes any skipped indices beyond
+  // the last explicitly matched word.
+  skippedIndices.forEach(index => {
+    if (index >= 0 && index < n) {
+      furthestMatch = Math.max(furthestMatch, index);
+    }
+  });
 
   return { targetMatched, recognizedMatched, furthestMatch };
 };
@@ -221,6 +234,10 @@ const applyWordHighlights = recognizedWords => {
   debugLog('Recognized words:', recognizedWords);
 
   const { targetMatched, recognizedMatched, furthestMatch } = matchWords(targetWords, recognizedWords);
+
+  // Cache the last recognized words so we can re-run highlighting
+  // when the user skips a word without needing a new recognition event.
+  lastRecognizedWords = [...recognizedWords];
 
   // Update the current match index for progress tracking
   currentMatchIndex = furthestMatch;
@@ -492,6 +509,7 @@ const clearTextView = () => {
   targetWords = [];
   displayWords = [];
   currentMatchIndex = -1;
+  skippedIndices.clear();
   rawTranscript = '';
   wordsContainer.innerHTML = '';
   setRecognizedMessage(idleRecognizedMessage);
@@ -536,6 +554,37 @@ const handleRecognitionResult = event => {
 
   pendingRecognition = { recognizedWords: [...recognizedWords] };
   renderRecognition();
+};
+
+/**
+ * Skip the current target word and move on to the next one.
+ * This does NOT count as a correct match in the summary,
+ * but it allows progressing when a word is too difficult.
+ */
+const skipCurrentWord = () => {
+  if (!targetWords.length) {
+    return;
+  }
+
+  // The "current" word is always the next index after the last
+  // completed word (matched or skipped).
+  const nextIndex = currentMatchIndex + 1;
+
+  if (nextIndex < 0 || nextIndex >= targetWords.length) {
+    return;
+  }
+
+  skippedIndices.add(nextIndex);
+
+  // Re-run highlighting based on the last recognition data so the
+  // UI moves on to the next word immediately.
+  if (lastRecognizedWords.length) {
+    applyWordHighlights(lastRecognizedWords);
+  } else {
+    // No recognition yet; force a basic visual update so the
+    // "current" marker advances.
+    applyWordHighlights([]);
+  }
 };
 
 /**
@@ -657,6 +706,7 @@ const startListening = async () => {
 
   // Reset state for new session
   currentMatchIndex = -1;
+  skippedIndices.clear();
   rawTranscript = '';
   resetWordHighlights();
   resetSessionSummary();
@@ -775,6 +825,10 @@ clearViewButton.addEventListener('click', clearTextView);
 startSessionButton.addEventListener('click', startListening);
 stopSessionButton.addEventListener('click', stopListening);
 
+if (skipWordButton) {
+  skipWordButton.addEventListener('click', skipCurrentWord);
+}
+
 textInput.addEventListener('keydown', event => {
   if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
     event.preventDefault();
@@ -797,6 +851,11 @@ document.addEventListener('keydown', event => {
     if (!isListening && targetWords.length) {
       startListening();
     }
+  }
+  // Alt+J to skip the current word
+  if (event.altKey && event.key === 'j') {
+    event.preventDefault();
+    skipCurrentWord();
   }
   // Alt+X or Escape to stop listening
   if ((event.altKey && event.key === 'x') || (event.key === 'Escape' && isListening)) {
